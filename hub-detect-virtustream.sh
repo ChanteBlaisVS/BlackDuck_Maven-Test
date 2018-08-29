@@ -1,0 +1,120 @@
+#!/bin/bash
+
+# DETECT_LATEST_RELEASE_VERSION should be set in your
+# environment if you wish to use a version different
+# from LATEST.
+DETECT_RELEASE_VERSION=${DETECT_LATEST_RELEASE_VERSION}
+
+# If you would like to enable the shell script to use
+# the latest snapshot instead of the latest release,
+# specify DETECT_USE_SNAPSHOT=1 in your environment.
+# The default is to NOT use snapshots. If you enable
+# snapshots, the jar file will be downloaded whenever
+# a new commit is added to the master branch.
+DETECT_USE_SNAPSHOT=${DETECT_USE_SNAPSHOT:-0}
+
+# To override the default location of /tmp, specify
+# your own DETECT_JAR_PATH in your environment and
+# *that* location will be used.
+DETECT_JAR_PATH=${DETECT_JAR_PATH:-/tmp}
+
+# If you want to pass any java options to the
+# invocation, specify DETECT_JAVA_OPTS in your
+# environment. For example, to specify a 6 gigabyte
+# heap size, you would set DETECT_JAVA_OPTS=-Xmx6G.
+DETECT_JAVA_OPTS=${DETECT_JAVA_OPTS:-}
+
+# If you want to pass any additional options to
+# curl, specify DETECT_CURL_OPTS in your environment.
+# For example, to specify a proxy, you would set
+# DETECT_CURL_OPTS=--proxy http://myproxy:3128
+DETECT_CURL_OPTS=${DETECT_CURL_OPTS:-}
+
+SCRIPT_ARGS="$@"
+LOGGABLE_SCRIPT_ARGS=""
+
+for i in $*; do
+  if [[ $is == --blackduck.hub.password=* ]]; then
+    LOGGABLE_SCRIPT_ARGS="$LOGGABLE_SCRIPT_ARGS --blackduck.hub.password=<redacted>"
+  elif [[ $i == --blackduck.hub.proxy.password=* ]]; then
+    LOGGABLE_SCRIPT_ARGS="$LOGGABLE_SCRIPT_ARGS --blackduck.hub.proxy.password=<redacted>"
+  elif [[ $i == --blackduck.hub.api.token=* ]]; then
+    LOGGABLE_SCRIPT_ARGS="$LOGGABLE_SCRIPT_ARGS --blackduck.hub.api.token=<redacted>"
+  else
+    LOGGABLE_SCRIPT_ARGS="$LOGGABLE_SCRIPT_ARGS $i"
+  fi
+done
+
+run() {
+  get_detect
+  run_detect
+}
+
+get_detect() {
+  VERSION_FILE_DESTINATION="${DETECT_JAR_PATH}/hub-detect-latest-commit-id.txt"
+  CURRENT_VERSION=""
+  if [ -f $VERSION_FILE_DESTINATION ]; then
+    CURRENT_VERSION=$( <$VERSION_FILE_DESTINATION )
+  fi
+
+  curl $DETECT_CURL_OPTS -o $VERSION_FILE_DESTINATION https://blackducksoftware.github.io/hub-detect/latest-commit-id.txt
+  LATEST_VERSION=$( <$VERSION_FILE_DESTINATION )
+
+  if [ $DETECT_USE_SNAPSHOT -eq 1 ]; then
+    if [ -z "${DETECT_RELEASE_VERSION}" ]; then
+      echo "will look for snapshot: hub-detect-latest-SNAPSHOT.jar"
+      DETECT_SOURCE="https://test-repo.blackducksoftware.com/artifactory/bds-integrations-snapshot/com/blackducksoftware/integration/hub-detect/latest-SNAPSHOT/hub-detect-latest-SNAPSHOT.jar"
+      DETECT_DESTINATION="${DETECT_JAR_PATH}/hub-detect-latest-SNAPSHOT.jar"
+    else
+      DETECT_SOURCE="https://artifactory.core.rcsops.com/artifactory/hub-detect/hub-detect-${DETECT_RELEASE_VERSION}.jar"
+      DETECT_DESTINATION="${DETECT_JAR_PATH}/hub-detect-${DETECT_RELEASE_VERSION}.jar"
+      chmod +x $DETECT_DESTINATION
+    fi
+  else
+    if [ -z "${DETECT_RELEASE_VERSION}" ]; then
+      DETECT_RELEASE_VERSION=$(curl $DETECT_CURL_OPTS 'https://test-repo.blackducksoftware.com/artifactory/api/search/latestVersion?g=com.blackducksoftware.integration&a=hub-detect&repos=bds-integrations-release')
+      DETECT_SOURCE="https://test-repo.blackducksoftware.com/artifactory/bds-integrations-release/com/blackducksoftware/integration/hub-detect/${DETECT_RELEASE_VERSION}/hub-detect-${DETECT_RELEASE_VERSION}.jar"
+      DETECT_DESTINATION="${DETECT_JAR_PATH}/hub-detect-${DETECT_RELEASE_VERSION}.jar"
+    else
+      DETECT_SOURCE="https://artifactory.core.rcsops.com/artifactory/hub-detect/hub-detect-${DETECT_RELEASE_VERSION}.jar"
+      DETECT_DESTINATION="${DETECT_JAR_PATH}/hub-detect-${DETECT_RELEASE_VERSION}.jar"
+    fi
+    echo "will look for : ${DETECT_SOURCE}"
+  fi
+
+  USE_REMOTE=1
+  if [ "$CURRENT_VERSION" != "$LATEST_VERSION" ] && [ $DETECT_USE_SNAPSHOT -eq 1 ]; then
+    echo "You don't have the latest snapshot, so the new snapshot will be downloaded."
+  elif [ ! -f $DETECT_DESTINATION ]; then
+    echo "You don't have the current file, so it will be downloaded."
+  else
+    echo "You have already downloaded the latest file, so the local file will be used."
+    USE_REMOTE=0
+  fi
+
+  if [ $USE_REMOTE -eq 1 ]; then
+    echo "getting ${DETECT_SOURCE} from remote"
+    curl $DETECT_CURL_OPTS -L -o $DETECT_DESTINATION "${DETECT_SOURCE}"
+    echo "saved ${DETECT_SOURCE} to ${DETECT_DESTINATION}"
+  fi
+}
+
+run_detect() {
+  JAVACMD="java ${DETECT_JAVA_OPTS} -jar ${DETECT_DESTINATION}"
+  echo "running detect: ${JAVACMD} ${LOGGABLE_SCRIPT_ARGS}"
+
+  # first, silently delete (-f ignores missing
+  # files) any existing shell script, then create
+  # the one we will run
+  rm -f $DETECT_JAR_PATH/hub-detect-java.sh
+  echo "#!/bin/sh" >> $DETECT_JAR_PATH/hub-detect-java.sh
+  echo "" >> $DETECT_JAR_PATH/hub-detect-java.sh
+  echo $JAVACMD $SCRIPT_ARGS >> $DETECT_JAR_PATH/hub-detect-java.sh
+  source $DETECT_JAR_PATH/hub-detect-java.sh
+  RESULT=$?
+  echo "Result code of ${RESULT}, exiting"
+  rm -f $DETECT_JAR_PATH/hub-detect-java.sh
+  exit $RESULT
+}
+
+run
